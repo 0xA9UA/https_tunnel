@@ -67,47 +67,68 @@ def install_python_tunnel_server():
         """
         import asyncio
         import json
-        import socket
 
         import websockets
 
-        async def register_reverse_ssh(ws, local_ssh_port):
-            registration_message = {
-                "action": "register_reverse",
-                "remote_port": local_ssh_port,
-            }
-            await ws.send(json.dumps(registration_message))
-            print(f"Reverse SSH port {local_ssh_port} registered.")
+        active_lock = asyncio.Lock()
 
-        async def handle_ssh_tunnel(ws, local_ssh_port):
-            loop = asyncio.get_running_loop()
-            local_ssh_socket = socket.socket(
-                socket.AF_INET, socket.SOCK_STREAM
+        async def bridge_connection(ws, reader, writer):
+            if active_lock.locked():
+                writer.close()
+                await writer.wait_closed()
+                return
+
+            async with active_lock:
+                await ws.send(json.dumps({"action": "connect"}))
+
+                async def ws_to_tcp():
+                    async for message in ws:
+                        if isinstance(message, bytes):
+                            writer.write(message)
+                            await writer.drain()
+                        else:
+                            cmd = json.loads(message)
+                            if cmd.get("action") == "close":
+                                break
+
+                async def tcp_to_ws():
+                    while True:
+                        data = await reader.read(4096)
+                        if not data:
+                            break
+                        await ws.send(data)
+                    await ws.send(json.dumps({"action": "close"}))
+
+                await asyncio.gather(
+                    ws_to_tcp(),
+                    tcp_to_ws(),
+                    return_exceptions=True,
+                )
+
+                writer.close()
+                await writer.wait_closed()
+
+
+        async def tunnel_handler(ws):
+            registration = json.loads(await ws.recv())
+            remote_port = registration.get("remote_port", 2022)
+
+            server = await asyncio.start_server(
+                lambda r, w: bridge_connection(ws, r, w),
+                "0.0.0.0",
+                remote_port,
             )
-            local_ssh_socket.setblocking(False)
-            await loop.sock_connect(
-                local_ssh_socket, ("127.0.0.1", local_ssh_port)
-            )
+            print(f"Reverse tunnel listening on {remote_port}")
 
-            async def ws_to_ssh():
-                async for data in ws:
-                    if isinstance(data, str):
-                        data = data.encode()
-                    await loop.sock_sendall(local_ssh_socket, data)
+            async with server:
+                await ws.wait_closed()
 
-            async def ssh_to_ws():
-                while True:
-                    data = await loop.sock_recv(local_ssh_socket, 4096)
-                    if not data:
-                        break
-                    await ws.send(data)
-
-            await asyncio.gather(ws_to_ssh(), ssh_to_ws())
 
         async def main():
-            async with websockets.serve(handle_ssh_tunnel, "127.0.0.1", 9000):
+            async with websockets.serve(tunnel_handler, "127.0.0.1", 9000):
                 print("WebSocket tunnel server started on port 9000.")
                 await asyncio.Future()
+
 
         if __name__ == "__main__":
             asyncio.run(main())

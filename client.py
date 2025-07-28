@@ -20,32 +20,47 @@ async def register_reverse_ssh(ws, remote_port):
 
 
 async def handle_ssh_tunnel(ws, local_ssh_port):
-    """Handle the bidirectional tunnel between WebSocket and local SSH."""
+    """Forward data between the server WebSocket and the local SSH port."""
     loop = asyncio.get_running_loop()
-    local_ssh_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    local_ssh_socket.setblocking(False)
-    await loop.sock_connect(local_ssh_socket, ("127.0.0.1", local_ssh_port))
+    local_sock = None
+    reader_task = None
 
-    async def ws_to_ssh():
-        try:
-            async for data in ws:
-                if isinstance(data, str):
-                    data = data.encode()
-                await loop.sock_sendall(local_ssh_socket, data)
-        except websockets.ConnectionClosed:
-            pass
-
-    async def ssh_to_ws():
+    async def read_local(sock):
         try:
             while True:
-                data = await loop.sock_recv(local_ssh_socket, 4096)
+                data = await loop.sock_recv(sock, 4096)
                 if not data:
                     break
                 await ws.send(data)
         finally:
-            local_ssh_socket.close()
+            await ws.send(json.dumps({"action": "close"}))
 
-    await asyncio.gather(ws_to_ssh(), ssh_to_ws())
+    try:
+        async for message in ws:
+            if isinstance(message, str):
+                command = json.loads(message)
+                if command.get("action") == "connect" and local_sock is None:
+                    local_sock = socket.socket(
+                        socket.AF_INET, socket.SOCK_STREAM
+                    )
+                    local_sock.setblocking(False)
+                    await loop.sock_connect(
+                        local_sock, ("127.0.0.1", local_ssh_port)
+                    )
+                    reader_task = asyncio.create_task(read_local(local_sock))
+                elif command.get("action") == "close" and local_sock:
+                    local_sock.close()
+                    local_sock = None
+                    if reader_task:
+                        reader_task.cancel()
+                        reader_task = None
+            elif local_sock:
+                await loop.sock_sendall(local_sock, message)
+    finally:
+        if local_sock:
+            local_sock.close()
+        if reader_task:
+            reader_task.cancel()
 
 
 async def main():
