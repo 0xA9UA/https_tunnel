@@ -20,6 +20,7 @@ async def register_reverse_ssh(ws, remote_port):
 
 
 async def handle_ssh_tunnel(ws, local_ssh_port):
+
     """Forward data between the server WebSocket and the local SSH port."""
     loop = asyncio.get_running_loop()
     local_sock = None
@@ -29,10 +30,12 @@ async def handle_ssh_tunnel(ws, local_ssh_port):
         try:
             while True:
                 data = await loop.sock_recv(sock, 4096)
+
                 if not data:
                     break
                 await ws.send(data)
         finally:
+
             await ws.send(json.dumps({"action": "close"}))
 
     try:
@@ -61,6 +64,7 @@ async def handle_ssh_tunnel(ws, local_ssh_port):
             local_sock.close()
         if reader_task:
             reader_task.cancel()
+
 
 
 async def main():
